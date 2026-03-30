@@ -1,64 +1,73 @@
 #!/bin/bash
 
-# Usage: ./spring_finder.sh targets.txt
-
 INPUT=$1
 OUTPUT="spring_targets.txt"
-TMP="tmp_spring_scan.txt"
 
 > $OUTPUT
-> $TMP
 
-echo "[*] Starting Spring Boot detection..."
+echo "[*] Advanced Spring Boot scan..."
 
-while read -r url; do
-    echo "[*] Checking $url"
+check_target() {
+    url=$1
 
-    # нормализуем
-    if [[ $url != http* ]]; then
+    # нормализация
+    if [[ ! "$url" =~ ^http ]]; then
         url="http://$url"
     fi
 
-    # 1. Проверка /actuator
-    actuator=$(curl -sk -o /dev/null -w "%{http_code}" "$url/actuator")
+    UA="Mozilla/5.0"
 
-    # 2. Получаем headers + body
-    response=$(curl -sk -D - "$url" -o -)
+    # список путей
+    paths=(
+        ""
+        "/"
+        "/error"
+        "/actuator"
+        "/actuator/health"
+        "/actuator/info"
+    )
 
-    # --- DETECTION FLAGS ---
-    is_spring=0
+    for path in "${paths[@]}"; do
+        full="$url$path"
 
-    # actuator exists
-    if [[ "$actuator" == "200" || "$actuator" == "401" || "$actuator" == "403" ]]; then
-        echo "[+] $url -> actuator detected ($actuator)"
-        is_spring=1
-    fi
+        resp=$(curl -sk --max-time 6 -A "$UA" "$full")
 
-    # X-Application-Context header
-    if echo "$response" | grep -qi "X-Application-Context"; then
-        echo "[+] $url -> X-Application-Context header"
-        is_spring=1
-    fi
+        # 1. Whitelabel
+        if echo "$resp" | grep -qi "Whitelabel Error Page"; then
+            echo "[+] Spring (whitelabel): $url"
+            echo "$url" >> $OUTPUT
+            return
+        fi
 
-    # Whitelabel Error Page
-    if echo "$response" | grep -qi "Whitelabel Error Page"; then
-        echo "[+] $url -> Whitelabel page"
-        is_spring=1
-    fi
+        # 2. actuator JSON
+        if echo "$resp" | grep -qiE '"_links"|\"status\"'; then
+            echo "[+] Spring (actuator): $url"
+            echo "$url" >> $OUTPUT
+            return
+        fi
 
-    # JSON Spring error format
-    if echo "$response" | grep -q "\"timestamp\"" && echo "$response" | grep -q "\"status\""; then
-        echo "[+] $url -> Spring JSON error pattern"
-        is_spring=1
-    fi
+        # 3. error JSON Spring style
+        if echo "$resp" | grep -qiE '"timestamp"|\"path\"|\"error\"'; then
+            echo "[+] Spring (error JSON): $url"
+            echo "$url" >> $OUTPUT
+            return
+        fi
+    done
 
-    # save result
-    if [[ $is_spring -eq 1 ]]; then
+    # 4. headers отдельно
+    headers=$(curl -sk -I --max-time 5 -A "$UA" "$url")
+    if echo "$headers" | grep -qi "X-Application-Context"; then
+        echo "[+] Spring (header): $url"
         echo "$url" >> $OUTPUT
+        return
     fi
+}
 
-done < "$INPUT"
+export -f check_target
+export OUTPUT
+
+cat "$INPUT" | xargs -P 20 -I{} bash -c 'check_target "$@"' _ {}
 
 sort -u $OUTPUT -o $OUTPUT
 
-echo "[*] Done. Results saved to $OUTPUT"
+echo "[*] Done. Found $(wc -l < $OUTPUT) Spring targets."
